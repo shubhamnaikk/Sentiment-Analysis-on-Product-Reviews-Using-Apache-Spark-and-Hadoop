@@ -1,0 +1,25 @@
+# Core dependencies
+pandas==2.0.3
+numpy==1.24.3
+requests==2.31.0
+pyarrow==14.0.1
+
+# Big data processing
+pyspark==3.5.0
+findspark==2.0.1
+
+# Visualization
+matplotlib==3.7.2
+seaborn==0.12.2
+
+# Utilities
+tqdm==4.66.1
+python-dateutil==2.8.2
+boto3==1.28.38
+jsonschema==4.19.0
+
+# Development tools
+jupyter==1.0.0
+ipykernel==6.25.1
+pytest==7.4.0
+pytest-spark==0.6.0

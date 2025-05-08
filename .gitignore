@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Big Data / Hadoop / Spark specific
+*.crc
+_SUCCESS
+metastore_db/
+derby.log
+spark-warehouse/
+.ivy2/
+.m2/
+
+# Data files
+data/raw/
+data/processed/
+data/mapreduce/
+*.json
+*.csv
+*.gz
+*.parquet
+*.avro
+*.orc
+
+# Project specific
+hadoop_data/
+.Trash/
+.staging/
+
+# Output files
+output/
+results/
+*.json.out
+*.csv.out
+
+# Configuration files with sensitive info
+.env
+credentials.yml
