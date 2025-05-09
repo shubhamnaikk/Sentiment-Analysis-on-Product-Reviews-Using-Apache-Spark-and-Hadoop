@@ -1,152 +1,253 @@
+#!/usr/bin/env python3
+
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_date, year, month, dayofmonth
+from pyspark.sql.functions import col, regexp_extract, to_date, when, length, lit
 import logging
 import os
-import subprocess
+import time
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("logs/mapreduce_preparation.log"),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
 def create_spark_session():
-    """Create and return a Spark session"""
-    logger.info("Creating Spark session...")
+    """Create and return a Spark session with retry logic"""
+    max_retries = 3
+    retry_count = 0
     
-    spark = SparkSession.builder \
-        .appName("Amazon Reviews MapReduce Preparation") \
-        .config("spark.executor.memory", "4g") \
-        .config("spark.driver.memory", "4g") \
-        .getOrCreate()
-    
-    logger.info(f"Created Spark session: {spark.version}")
-    return spark
+    while retry_count < max_retries:
+        try:
+            spark = SparkSession.builder \
+                .appName("MapReduce Data Preparation") \
+                .config("spark.driver.memory", "4g") \
+                .config("spark.executor.memory", "4g") \
+                .config("spark.network.timeout", "800s") \
+                .config("spark.executor.heartbeatInterval", "60s") \
+                .getOrCreate()
+            
+            logger.info(f"Created Spark session: {spark.version}")
+            return spark
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"Error creating Spark session (attempt {retry_count}/{max_retries}): {str(e)}")
+            if retry_count >= max_retries:
+                raise
+            time.sleep(5)  # Wait before retrying
 
-def prepare_product_rating_data(spark, category):
-    """Prepare data for product rating analysis"""
-    input_path = f"/user/amazon_reviews/processed/{category}_processed"
+def prepare_data_safely(spark, category):
+    """Prepare all data types for a category with error handling"""
+    try:
+        # Check if the spark session is still active
+        if spark._jsc.sc().isStopped():
+            logger.warning("Spark context stopped, recreating...")
+            spark = create_spark_session()
+        
+        # Load the data only once per category
+        input_path = f"/user/amazon_reviews/processed/{category}_processed"
+        logger.info(f"Loading data for {category}...")
+        
+        try:
+            df = spark.read.parquet(input_path)
+            logger.info(f"Successfully loaded {df.count()} records for {category}")
+            
+            # Prepare product ratings
+            prepare_product_ratings(spark, df, category)
+            
+            # Prepare time analysis
+            prepare_time_analysis(spark, df, category)
+            
+            # Prepare review length
+            prepare_review_length(spark, df, category)
+        
+        except Exception as e:
+            logger.error(f"Error processing {category}: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"Fatal error processing {category}: {str(e)}")
+
+def prepare_product_ratings(spark, df, category):
+    """Prepare product rating data for MapReduce"""
     output_path = f"/user/amazon_reviews/mapreduce/{category}_product_ratings"
     
     logger.info(f"Preparing product rating data for {category}...")
     
     try:
-        # Load processed data
-        df = spark.read.parquet(input_path)
-        
-        # Select and transform relevant columns
-        product_ratings = df.select(
-            col("product_id"),
-            col("rating"),
-            col("review_date")
-        )
-        
-        # Save in an optimized format for MapReduce
-        product_ratings.write.json(output_path, mode="overwrite")
-        
-        logger.info(f"Saved product rating data to {output_path}")
-        return True
+        # Select product_id and rating columns
+        if "product_id" in df.columns and "rating" in df.columns:
+            # Filter out rows with null ratings
+            ratings_df = df.select("product_id", "rating") \
+                          .filter(col("product_id").isNotNull() & col("rating").isNotNull())
+            
+            # Count records for logging
+            count = ratings_df.count()
+            logger.info(f"Found {count} product ratings for {category}")
+            
+            if count > 0:
+                # Save as text file with tab delimiter for MapReduce
+                ratings_df.write.mode("overwrite") \
+                          .format("csv") \
+                          .option("delimiter", "\t") \
+                          .option("header", "false") \
+                          .save(output_path)
+                
+                logger.info(f"Saved product ratings for {category}")
+            else:
+                logger.warning(f"No product ratings to save for {category}")
+        else:
+            logger.error(f"Required columns not found in {category} data")
+            
     except Exception as e:
         logger.error(f"Error preparing product rating data for {category}: {str(e)}")
-        return False
 
-def prepare_time_analysis_data(spark, category):
-    """Prepare data for time-based analysis"""
-    input_path = f"/user/amazon_reviews/processed/{category}_processed"
+def prepare_time_analysis(spark, df, category):
+    """Prepare time analysis data for MapReduce"""
     output_path = f"/user/amazon_reviews/mapreduce/{category}_time_analysis"
     
     logger.info(f"Preparing time analysis data for {category}...")
     
     try:
-        # Load processed data
-        df = spark.read.parquet(input_path)
-        
-        # Convert dates and add time components
-        if "review_date" in df.columns:
-            time_analysis = df.select(
-                col("product_id"),
-                col("rating"),
-                col("review_date")
+        # Check if details column exists
+        if "details" in df.columns:
+            # Extract date information
+            date_df = df.withColumn(
+                "extracted_date",
+                regexp_extract(col("details"), "\"Date First Available\":\\s*\"([^\"]+)\"", 1)
             )
             
-            # Add year, month columns if date is available
-            time_analysis = time_analysis.withColumn(
-                "year", year(col("review_date"))
-            ).withColumn(
-                "month", month(col("review_date"))
-            ).withColumn(
-                "day", dayofmonth(col("review_date"))
+            # Convert extracted dates to standard format
+            date_df = date_df.withColumn(
+                "review_date", 
+                to_date(col("extracted_date"), "MMMM d, yyyy")
             )
             
-            # Save in an optimized format for MapReduce
-            time_analysis.write.json(output_path, mode="overwrite")
+            # Select relevant columns and filter out rows with null dates
+            time_df = date_df.select(
+                "product_id", "review_date", "rating", "category"
+            ).filter(col("review_date").isNotNull())
             
-            logger.info(f"Saved time analysis data to {output_path}")
-            return True
+            # Check if we have any records with valid dates
+            count = time_df.count()
+            logger.info(f"Found {count} records with valid dates for {category}")
+            
+            if count > 0:
+                # Save as text file with tab delimiter for MapReduce
+                time_df.write.mode("overwrite") \
+                       .format("csv") \
+                       .option("delimiter", "\t") \
+                       .option("header", "false") \
+                       .save(output_path)
+                
+                logger.info(f"Saved time analysis data for {category}")
+            else:
+                logger.warning(f"No valid dates found in {category} data")
         else:
-            logger.error(f"No review_date column found in {category} data")
-            return False
+            logger.error(f"No details column found in {category} data")
+            
     except Exception as e:
         logger.error(f"Error preparing time analysis data for {category}: {str(e)}")
-        return False
 
-def prepare_review_length_data(spark, category):
-    """Prepare data for review length analysis"""
-    input_path = f"/user/amazon_reviews/processed/{category}_processed"
+def prepare_review_length(spark, df, category):
+    """Prepare review length data for MapReduce"""
     output_path = f"/user/amazon_reviews/mapreduce/{category}_review_length"
     
     logger.info(f"Preparing review length data for {category}...")
     
     try:
-        # Load processed data
-        df = spark.read.parquet(input_path)
+        # Calculate lengths for available text fields
+        length_df = df
         
-        # Select relevant columns
-        review_length = df.select(
-            col("product_id"),
-            col("rating"),
-            col("review_length"),
-            col("category")
+        # Add description length if description column exists
+        if "description" in df.columns:
+            length_df = length_df.withColumn(
+                "description_length", 
+                when(col("description").isNotNull(), length(col("description"))).otherwise(0)
+            )
+        else:
+            length_df = length_df.withColumn("description_length", lit(0))
+        
+        # Add features length if features column exists
+        if "features" in df.columns:
+            length_df = length_df.withColumn(
+                "features_length", 
+                when(col("features").isNotNull(), length(col("features"))).otherwise(0)
+            )
+        else:
+            length_df = length_df.withColumn("features_length", lit(0))
+        
+        # Add title length
+        if "title" in df.columns:
+            length_df = length_df.withColumn(
+                "title_length", 
+                when(col("title").isNotNull(), length(col("title"))).otherwise(0)
+            )
+        else:
+            length_df = length_df.withColumn("title_length", lit(0))
+        
+        # Create a composite review_length field
+        length_df = length_df.withColumn(
+            "review_length",
+            when(col("description_length") > 0, col("description_length"))
+            .otherwise(
+                when(col("features_length") > 0, col("features_length"))
+                .otherwise(
+                    when(col("title_length") > 0, col("title_length"))
+                    .otherwise(0)
+                )
+            )
         )
         
-        # Save in an optimized format for MapReduce
-        review_length.write.json(output_path, mode="overwrite")
+        # Select relevant columns and filter out rows with zero length
+        review_length_df = length_df.select(
+            "product_id", "review_length", "rating", "category"
+        ).filter(col("review_length") > 0)
         
-        logger.info(f"Saved review length data to {output_path}")
-        return True
+        # Check if we have any records with valid lengths
+        count = review_length_df.count()
+        logger.info(f"Found {count} records with valid lengths for {category}")
+        
+        if count > 0:
+            # Save as text file with tab delimiter for MapReduce
+            review_length_df.write.mode("overwrite") \
+                          .format("csv") \
+                          .option("delimiter", "\t") \
+                          .option("header", "false") \
+                          .save(output_path)
+            
+            logger.info(f"Saved review length data for {category}")
+        else:
+            logger.warning(f"No valid lengths found in {category} data")
+            
     except Exception as e:
         logger.error(f"Error preparing review length data for {category}: {str(e)}")
-        return False
 
-def prepare_all_data(spark):
-    """Prepare all data for different MapReduce analyses"""
-    categories = ["electronics", "toys_games", "cell_phones", "all_reviews"]
+def main():
+    """Main function"""
+    logger.info("Starting MapReduce data preparation...")
     
-    # Ensure HDFS directories exist
-    subprocess.run("hdfs dfs -mkdir -p /user/amazon_reviews/mapreduce", shell=True)
+    try:
+        # Create Spark session
+        spark = create_spark_session()
+        
+        # Prepare data for each category
+        categories = ["electronics", "toys_games", "cell_phones", "all_reviews"]
+        
+        for category in categories:
+            prepare_data_safely(spark, category)
+        
+        logger.info("All data prepared for MapReduce analysis")
+        
+        # Stop Spark session
+        logger.info("Stopping Spark session...")
+        if spark and not spark._jsc.sc().isStopped():
+            spark.stop()
+        
+        logger.info("MapReduce data preparation completed")
     
-    # Prepare specific datasets for each analysis type
-    for category in categories:
-        prepare_product_rating_data(spark, category)
-        prepare_time_analysis_data(spark, category)
-        prepare_review_length_data(spark, category)
-    
-    logger.info("All data prepared for MapReduce analysis")
+    except Exception as e:
+        logger.error(f"Fatal error in main: {str(e)}")
 
 if __name__ == "__main__":
-    try:
-        logger.info("Starting MapReduce data preparation...")
-        spark = create_spark_session()
-        prepare_all_data(spark)
-        spark.stop()
-        logger.info("MapReduce data preparation completed")
-    except Exception as e:
-        logger.error(f"Error in MapReduce data preparation: {str(e)}")
+    main()

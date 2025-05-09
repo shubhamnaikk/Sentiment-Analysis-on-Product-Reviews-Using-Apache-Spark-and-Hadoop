@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_unixtime, length, lit
+from pyspark.sql.functions import col, from_unixtime, length, lit, when, expr
 import logging
 import os
 
@@ -36,10 +36,12 @@ def load_data(spark, category):
     logger.info(f"Loading {category} data from HDFS: {hdfs_path}")
     
     df = spark.read.json(hdfs_path)
-    logger.info(f"Loaded {df.count()} records for {category}")
+    count = df.count()
+    logger.info(f"Loaded {count} records for {category}")
     
-    # Add category column
-    df = df.withColumn("category", lit(category))
+    # Add category column if it doesn't exist
+    if "category" not in df.columns:
+        df = df.withColumn("category", lit(category))
     
     return df
 
@@ -51,33 +53,108 @@ def preprocess_data(df, category):
     initial_count = df.count()
     logger.info(f"Initial record count: {initial_count}")
     
-    # Select and rename relevant columns
-    if "unixReviewTime" in df.columns:
-        df = df.withColumn("review_date", from_unixtime(col("unixReviewTime"), "yyyy-MM-dd"))
+    # Print schema to log for debugging
+    logger.info(f"DataFrame schema for {category}:")
+    df.printSchema()
     
-    # Add review length column if reviewText exists
-    if "reviewText" in df.columns:
-        df = df.withColumn("review_length", length(col("reviewText")))
+    # Sample a few rows to understand the data structure
+    logger.info(f"Sample rows from {category} (first 2 rows):")
+    sample_rows = df.limit(2).collect()
+    for row in sample_rows:
+        logger.info(str(row))
     
-    # Remove rows with null values in critical fields
-    df = df.dropna(subset=["asin", "overall"])
+    # Since we're working with product metadata (not reviews),
+    # we need to adjust our processing logic
     
-    # Remove duplicate reviews if all needed columns exist
-    if all(col in df.columns for col in ["reviewerID", "asin", "unixReviewTime"]):
-        df = df.dropDuplicates(["reviewerID", "asin", "unixReviewTime"])
+    # Identify key fields and handle missing or renamed columns
+    # We'll create a consistent schema across all categories
     
-    # Select and rename relevant columns
-    df = df.select(
-        col("reviewerID"),
-        col("asin").alias("product_id"),
-        col("overall").alias("rating"),
-        col("reviewText"),
-        col("review_length") if "review_length" in df.columns else length(col("reviewText")).alias("review_length"),
-        col("summary") if "summary" in df.columns else lit(None).alias("summary"),
-        col("review_date") if "review_date" in df.columns else lit(None).alias("review_date"),
-        col("verified") if "verified" in df.columns else lit(None).alias("verified"),
-        col("category")
-    )
+    # Start with common columns
+    selected_columns = []
+    
+    # Product ID (could be asin or parent_asin)
+    if "parent_asin" in df.columns:
+        selected_columns.append(col("parent_asin").alias("product_id"))
+    elif "asin" in df.columns:
+        selected_columns.append(col("asin").alias("product_id"))
+    else:
+        # If neither exists, create a dummy ID
+        logger.warning(f"No product ID field found in {category}. Using a placeholder.")
+        selected_columns.append(lit("unknown").alias("product_id"))
+    
+    # Product title
+    if "title" in df.columns:
+        selected_columns.append(col("title"))
+    else:
+        selected_columns.append(lit(None).alias("title"))
+    
+    # Product rating
+    if "average_rating" in df.columns:
+        selected_columns.append(col("average_rating").alias("rating"))
+    elif "overall" in df.columns:
+        selected_columns.append(col("overall").alias("rating"))
+    else:
+        selected_columns.append(lit(None).alias("rating"))
+    
+    # Number of ratings
+    if "rating_number" in df.columns:
+        selected_columns.append(col("rating_number"))
+    else:
+        selected_columns.append(lit(None).alias("rating_number"))
+    
+    # Price
+    if "price" in df.columns:
+        selected_columns.append(col("price"))
+    else:
+        selected_columns.append(lit(None).alias("price"))
+    
+    # Main category
+    if "main_category" in df.columns:
+        selected_columns.append(col("main_category"))
+    else:
+        selected_columns.append(lit(None).alias("main_category"))
+    
+    # Store
+    if "store" in df.columns:
+        selected_columns.append(col("store"))
+    else:
+        selected_columns.append(lit(None).alias("store"))
+    
+    # Description - convert array to string if needed
+    if "description" in df.columns:
+        if "array" in df.schema["description"].dataType.simpleString():
+            # Convert array to string
+            selected_columns.append(expr("array_join(description, ' ')").alias("description"))
+        else:
+            selected_columns.append(col("description"))
+    else:
+        selected_columns.append(lit(None).alias("description"))
+    
+    # Features - convert array to string if needed
+    if "features" in df.columns:
+        if "array" in df.schema["features"].dataType.simpleString():
+            # Convert array to string
+            selected_columns.append(expr("array_join(features, ' ')").alias("features"))
+        else:
+            selected_columns.append(col("features"))
+    else:
+        selected_columns.append(lit(None).alias("features"))
+    
+    # Categories - convert array to string if needed
+    if "categories" in df.columns:
+        if "array" in df.schema["categories"].dataType.simpleString():
+            # Convert array to string
+            selected_columns.append(expr("array_join(categories, ' ')").alias("categories"))
+        else:
+            selected_columns.append(col("categories"))
+    else:
+        selected_columns.append(lit(None).alias("categories"))
+
+    # Add dataset category
+    selected_columns.append(col("category"))
+    
+    # Select columns and handle nulls
+    df = df.select(*selected_columns)
     
     # Count final records
     final_count = df.count()
