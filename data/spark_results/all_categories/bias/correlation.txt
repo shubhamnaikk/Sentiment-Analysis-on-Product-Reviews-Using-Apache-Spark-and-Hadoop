@@ -1,0 +1,1 @@
+Correlation between review length and rating: 0.0485
