@@ -1,0 +1,11 @@
+Ratings Distribution Statistics
+==============================
+Count: 100
+Minimum: 1.05
+Maximum: 4.94
+Mean: 3.05
+Standard Deviation: 1.09
+Median: 3.13
+25th Percentile: 2.12
+75th Percentile: 3.92
+Interquartile Range: 1.80
